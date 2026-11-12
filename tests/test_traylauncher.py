@@ -70,7 +70,7 @@ APPS = [
     {"name": "Notepad", "path": "notepad.exe"},
     {"separator": True},
     {"name": "AI", "items": [
-        {"name": "ChatGPT", "path": "g"},
+        {"name": "Calculator", "path": "g"},
         {"name": "More", "items": [{"name": "Deep", "path": "d"}]},
     ]},
 ]
@@ -121,13 +121,13 @@ def test_build_items_handles_folders_and_separators():
     items = T.build_items(APPS, Item, Menu)
     assert items[0].text == "Notepad"
     assert items[1] == "SEP"
-    assert [i.text for i in items[2].action.items][0] == "ChatGPT"
+    assert [i.text for i in items[2].action.items][0] == "Calculator"
 
 
 # Icons ----------------------------------------------------------------------
 
 def test_letter_tile_is_the_right_size():
-    img = T.letter_tile("Claude", 40)
+    img = T.letter_tile("Paint", 40)
     assert img.size == (40, 40)
 
 
@@ -236,7 +236,7 @@ def test_flyout_opens_after_a_short_hover(make_menu):
     assert main.child is None
     clock.advance(200)
     assert main.child is not None
-    assert main.child.rows[0]["entry"]["name"] == "ChatGPT"
+    assert main.child.rows[0]["entry"]["name"] == "Calculator"
 
 
 def test_flyout_has_no_edit_footer(make_menu):
