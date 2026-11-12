@@ -11,6 +11,10 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      # The tag name is passed as a variable, never pasted into a script,
+      # so unusual characters in a tag cannot run as code.
+      TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,7 +22,14 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: pip install --require-hashes -r requirements-lock.txt
+
+      - name: Check the tag matches the version in the code
+        shell: pwsh
+        run: |
+          $version = $env:TAG.TrimStart("v")
+          $code = python -c "import traylauncher; print(traylauncher.__version__)"
+          if ($code -ne $version) { throw "Tag $env:TAG does not match __version__ $code in traylauncher.py" }
 
       - name: Run tests
         run: python -m pytest -q
@@ -37,14 +48,15 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
-          choco install innosetup -y --no-progress
-          $version = "${{ github.ref_name }}".TrimStart("v")
+          choco install innosetup --version=6.7.1 -y --no-progress
+          $version = $env:TAG.TrimStart("v")
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" installer\TrayLauncher.iss
+          if ($LASTEXITCODE -ne 0) { throw "Installer build failed" }
 
       - name: Make portable zip
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
+          $version = $env:TAG.TrimStart("v")
           Copy-Item apps.example.json dist\TrayLauncher\apps.json
           Compress-Archive -Path dist\TrayLauncher -DestinationPath "release\TrayLauncher-Portable-$version.zip"
 
@@ -53,4 +65,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" (Get-ChildItem release\*.exe, release\*.zip).FullName --title "${{ github.ref_name }}" --generate-notes
+          gh release create $env:TAG (Get-ChildItem release\*.exe, release\*.zip).FullName --title $env:TAG --generate-notes
