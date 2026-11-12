@@ -1,8 +1,8 @@
-; Inno Setup script. Build with:  iscc /DAppVersion=1.0.1 installer\TrayLauncher.iss
+; Inno Setup script. Build with:  iscc /DAppVersion=1.0.2 installer\TrayLauncher.iss
 ; Expects dist\TrayLauncher (PyInstaller output) and icon.ico in the repo root.
 
 #ifndef AppVersion
-  #define AppVersion "1.0.1"
+  #define AppVersion "1.0.2"
 #endif
 
 [Setup]

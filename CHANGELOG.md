@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.2
 
 - The menu is sharp and the right size on every monitor, even when monitors use different scale settings (for example 150% on a laptop and 100% on an external screen). Before, the menu was sized for the main monitor and Windows stretched it on the others, so it looked blurry or the wrong size there.
 - Folder flyouts stay on the monitor that was clicked. Before, on a narrow or portrait monitor, a flyout with no room on either side could open onto the next screen.
