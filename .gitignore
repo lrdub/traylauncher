@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+build/
+dist/
+release/
+*.spec
+icon.ico
+apps.json
+.pytest_cache/
+.venv/

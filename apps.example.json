@@ -1,0 +1,32 @@
+{
+  "apps": [
+    {
+      "name": "Notepad",
+      "path": "notepad.exe"
+    },
+    {
+      "name": "Calculator",
+      "path": "calc.exe"
+    },
+    {
+      "name": "File Explorer",
+      "path": "explorer.exe"
+    },
+    {
+      "separator": true
+    },
+    {
+      "name": "Web",
+      "items": [
+        {
+          "name": "GitHub",
+          "path": "https://github.com"
+        },
+        {
+          "name": "Wikipedia",
+          "path": "https://www.wikipedia.org"
+        }
+      ]
+    }
+  ]
+}
