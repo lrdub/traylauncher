@@ -1,0 +1,10 @@
+TrayLauncher is installed.
+
+To put it on your taskbar:
+1. Open the Start menu and find TrayLauncher (type its name).
+2. Drag it onto the taskbar.
+   If dragging does not work, right-click it, choose Open file location,
+   right-click TrayLauncher.exe, choose Show more options, then Pin to taskbar.
+
+Click the pinned icon to open the menu. Choose "Edit apps list" in the menu
+to change which apps appear.

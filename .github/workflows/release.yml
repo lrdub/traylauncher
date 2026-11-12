@@ -1,0 +1,56 @@
+name: Release
+
+# Push a tag like v1.0.0 to build the installer and publish a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Build program
+        run: |
+          python traylauncher.py --make-icon
+          python -m PyInstaller --noconsole --onedir --noconfirm --name TrayLauncher --icon icon.ico traylauncher.py
+
+      - name: Check the built program has all its libraries
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\TrayLauncher\TrayLauncher.exe -ArgumentList "--selftest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Built program failed its self test (exit code $($p.ExitCode))" }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" installer\TrayLauncher.iss
+
+      - name: Make portable zip
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          Copy-Item apps.example.json dist\TrayLauncher\apps.json
+          Compress-Archive -Path dist\TrayLauncher -DestinationPath "release\TrayLauncher-Portable-$version.zip"
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" (Get-ChildItem release\*.exe, release\*.zip).FullName --title "${{ github.ref_name }}" --generate-notes
