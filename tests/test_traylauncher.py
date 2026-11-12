@@ -205,7 +205,7 @@ def make_menu(monkeypatch):
     monkeypatch.setattr(T, "get_hwnd", lambda w: id(w))
     monkeypatch.setattr(T, "style_window", lambda *a: None)
 
-    def make(x=500, y=300, screen_w=1920, screen_h=1040):
+    def make(x=500, y=300, screen_w=1920, screen_h=1040, apps=APPS):
         tk = SimpleNamespace(Canvas=FakeCanvas, Toplevel=lambda root: FakeWin(clock))
         ctx = SimpleNamespace(
             tk=tk, root=FakeWin(clock), colors=T.theme(), S=S, W=300, PAD=8, ICON=26,
@@ -213,7 +213,7 @@ def make_menu(monkeypatch):
             work=(0, 0, screen_w, screen_h), panels=[], chosen=None, closed=False,
         )
         ctx.close = lambda: setattr(ctx, "closed", True)
-        main = T.MenuPanel(ctx, ctx.root, APPS, footer=True)
+        main = T.MenuPanel(ctx, ctx.root, apps, footer=True)
         main.show(x, y)
         return ctx, main, clock
 
@@ -222,12 +222,12 @@ def make_menu(monkeypatch):
 
 def hover(panel, name):
     row = next(r for r in panel.rows if (r.get("entry") or {}).get("name") == name)
-    panel.on_motion(SimpleNamespace(y=row["y"] + row["h"] // 2))
+    panel.on_motion(SimpleNamespace(y=row["y"] + row["h"] // 2 - panel.offset))
 
 
 def click(panel, name):
     row = next(r for r in panel.rows if (r.get("entry") or {}).get("name") == name)
-    panel.on_click(SimpleNamespace(y=row["y"] + row["h"] // 2))
+    panel.on_click(SimpleNamespace(y=row["y"] + row["h"] // 2 - panel.offset))
 
 
 def test_flyout_opens_after_a_short_hover(make_menu):
@@ -287,3 +287,263 @@ def test_flyout_stays_on_screen_at_the_bottom(make_menu):
     ctx, main, clock = make_menu(y=1000)
     click(main, "AI")
     assert main.child.y + main.child.height <= 1040
+
+
+def test_long_menu_is_cut_to_the_screen_and_scrolls(make_menu):
+    apps = [{"name": f"App {n}", "path": "x"} for n in range(40)]
+    ctx, main, clock = make_menu(screen_h=600, apps=apps)
+    assert main.height == 600 - 16 < main.full_height
+    first = main.row_at(30)
+    assert main.scroll(200)
+    assert main.row_at(30) is not first
+    assert main.row_at(30)["y"] <= 230 < main.row_at(30)["y"] + main.row_at(30)["h"]
+    main.scroll(10_000)  # cannot scroll past the end
+    assert main.offset == main.full_height - main.height
+    main.scroll(-10_000)
+    assert main.offset == 0
+
+
+def test_scrolling_closes_a_flyout_and_flyouts_follow_the_scroll(make_menu):
+    apps = [{"name": f"App {n}", "path": "x"} for n in range(30)] + [APPS[2]]
+    ctx, main, clock = make_menu(screen_h=600, apps=apps)
+    main.scroll(10_000)
+    click(main, "AI")
+    flyout = main.child
+    row = next(r for r in main.rows if (r.get("entry") or {}).get("name") == "AI")
+    wanted = main.y + row["y"] - main.offset - 8
+    assert flyout.y == max(min(wanted, 600 - flyout.height - 8), 8)
+    assert flyout.y != main.y + row["y"] - 8  # without the scroll offset it would be off screen
+    main.scroll(-50)
+    assert main.child is None and not flyout.win.alive
+
+
+# Config problems ----------------------------------------------------------------
+
+def write_config(isolated_dirs, data, encoding="utf-8"):
+    (isolated_dirs / "apps.json").write_text(json.dumps(data), encoding=encoding)
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig", "utf-16"])
+def test_config_loads_in_common_windows_encodings(isolated_dirs, encoding):
+    write_config(isolated_dirs, {"apps": [{"name": "Café", "path": "x"}]}, encoding)
+    config, error = T.load_config()
+    assert error is None
+    assert config["apps"][0]["name"] == "Café"
+
+
+def test_unreadable_bytes_report_an_error_instead_of_crashing(isolated_dirs):
+    (isolated_dirs / "apps.json").write_bytes(b"\x80\x81{}")
+    config, error = T.load_config()
+    assert config == {"apps": []}
+    assert "apps.json problem" in error
+
+
+def test_bad_entries_are_skipped_and_reported(isolated_dirs):
+    write_config(isolated_dirs, {"apps": [
+        "oops",
+        None,
+        {"name": "Good", "path": "x"},
+        {"name": "Folder", "items": [123, {"name": "Inner", "path": "y"}]},
+        {"name": "Bad args", "path": "z", "args": 5},
+        {"name": "Bad items", "items": "nope"},
+    ]})
+    config, error = T.load_config()
+    names = [e.get("name") for e in config["apps"]]
+    assert names == ["Good", "Folder"]
+    assert [e["name"] for e in config["apps"][1]["items"]] == ["Inner"]
+    assert error.startswith("apps.json problem: apps entry 1")
+    assert "(and 4 more)" in error
+
+
+def test_cleaned_config_works_in_every_menu(isolated_dirs):
+    write_config(isolated_dirs, {"apps": ["oops", {"name": 5, "path": 7}, {"name": "F", "items": [None]}]})
+    config, error = T.load_config()
+    rows, _ = T.layout(config["apps"], set(), S)
+    assert rows[0]["entry"]["name"] == "5" and rows[0]["entry"]["path"] == "7"
+    T.letter_tile(config["apps"][0]["name"], 16)
+
+
+def test_args_written_as_text_count_as_one_argument(isolated_dirs):
+    write_config(isolated_dirs, {"apps": [{"name": "A", "path": "x", "args": "--new-window"}]})
+    config, _ = T.load_config()
+    assert config["apps"][0]["args"] == ["--new-window"]
+
+
+def test_user_entries_cannot_pretend_to_be_the_edit_entry(isolated_dirs):
+    write_config(isolated_dirs, {"apps": [{"name": "A", "path": "x", T.EDIT_KEY: True}]})
+    config, _ = T.load_config()
+    assert T.EDIT_KEY not in config["apps"][0]
+
+
+# Launching ----------------------------------------------------------------------
+
+@pytest.fixture
+def popen(monkeypatch):
+    calls = []
+    monkeypatch.setattr(T.subprocess, "Popen", lambda cmd, **kw: calls.append((cmd, kw)))
+    return calls
+
+
+@pytest.fixture
+def boxes(monkeypatch):
+    shown = []
+    monkeypatch.setattr(T, "message_box", lambda text, error=True: shown.append((text, error)))
+    return shown
+
+
+def test_launch_passes_text_args_as_one_argument(popen):
+    T.launch({"path": "x.exe", "args": "--new-window"})
+    assert popen[0][0] == ["x.exe", "--new-window"]
+
+
+def test_launch_expands_variables_in_start_in(popen, monkeypatch):
+    monkeypatch.setenv("TL_TEST_DIR", "/some/folder")
+    T.launch({"path": "x.exe", "args": ["a"], "start_in": "%TL_TEST_DIR%" if os.name == "nt" else "$TL_TEST_DIR"})
+    assert popen[0][1]["cwd"] == "/some/folder"
+
+
+def test_launch_never_raises(monkeypatch, boxes):
+    def fail(*a, **k):
+        raise FileNotFoundError("no such program")
+
+    monkeypatch.setattr(T.subprocess, "Popen", fail)
+    T.launch({"name": "Broken", "path": "x.exe", "args": ["a"]})
+    T.launch({"name": "Weird", "path": "x.exe", "args": 5})
+    assert len(boxes) == 2 and "Broken" in boxes[0][0]
+
+
+def test_edit_entry_opens_the_config(monkeypatch):
+    opened = []
+    monkeypatch.setattr(T, "open_config", lambda: opened.append(True))
+    T.launch(T.edit_entry())
+    assert opened
+
+
+def test_edit_falls_back_to_notepad_when_json_has_no_program(monkeypatch, popen, isolated_dirs):
+    def no_program(path):
+        raise OSError("No application is associated with the specified file")
+
+    monkeypatch.setattr(T.os, "startfile", no_program, raising=False)
+    T.open_config()
+    assert popen[0][0] == ["notepad.exe", str(isolated_dirs / "apps.json")]
+
+
+def test_a_failed_pick_does_not_open_a_second_menu(monkeypatch):
+    launched = []
+    monkeypatch.setattr(T, "launch", lambda e: launched.append(e))
+
+    def classic():
+        raise AssertionError("classic menu must not open")
+
+    T.popup(modern=lambda: {"name": "A", "path": "x"}, classic=classic)
+    assert launched == [{"name": "A", "path": "x"}]
+
+
+def test_classic_menu_is_used_when_the_modern_one_fails(monkeypatch):
+    launched = []
+    monkeypatch.setattr(T, "launch", lambda e: launched.append(e))
+
+    def modern():
+        raise RuntimeError("no styled menu")
+
+    T.popup(modern=modern, classic=lambda: {"name": "B", "path": "y"})
+    assert launched == [{"name": "B", "path": "y"}]
+
+
+def test_version_shows_a_box_when_there_is_no_console(monkeypatch, boxes):
+    monkeypatch.setattr(T.sys, "stdout", None)
+    T.show_version()
+    assert boxes == [(f"TrayLauncher {T.__version__}", False)]
+
+
+# Start with Windows -------------------------------------------------------------
+
+class FakeWinreg:
+    HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ = 1, 2, 3
+
+    def __init__(self, saved=None):
+        self.values = {} if saved is None else {T.APP_NAME: saved}
+
+    def OpenKey(self, *a):
+        reg = self
+
+        class Key:
+            def __enter__(self):
+                return reg
+
+            def __exit__(self, *exc):
+                return False
+
+        return Key()
+
+    def QueryValueEx(self, key, name):
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        return self.values[name], self.REG_SZ
+
+    def SetValueEx(self, key, name, reserved, kind, value):
+        self.values[name] = value
+
+    def DeleteValue(self, key, name):
+        del self.values[name]
+
+
+def test_start_with_windows_starts_tray_mode():
+    assert T._run_command().endswith(" --tray")
+
+
+def test_old_start_with_windows_setting_is_repaired(monkeypatch):
+    reg = FakeWinreg(saved='"C:\\Apps\\TrayLauncher.exe"')
+    monkeypatch.setitem(sys.modules, "winreg", reg)
+    T.repair_autostart()
+    assert reg.values[T.APP_NAME] == '"C:\\Apps\\TrayLauncher.exe" --tray'
+
+
+def test_repair_keeps_a_correct_setting_from_another_copy(monkeypatch):
+    reg = FakeWinreg(saved='"C:\\Other\\TrayLauncher.exe" --tray')
+    monkeypatch.setitem(sys.modules, "winreg", reg)
+    T.repair_autostart()
+    assert reg.values[T.APP_NAME] == '"C:\\Other\\TrayLauncher.exe" --tray'
+
+
+def test_repair_leaves_start_with_windows_off(monkeypatch):
+    reg = FakeWinreg()
+    monkeypatch.setitem(sys.modules, "winreg", reg)
+    T.repair_autostart()
+    assert reg.values == {}
+
+
+# Icon pixels and cache ----------------------------------------------------------
+
+def test_premultiplied_icon_pixels_keep_their_colour():
+    # A half-transparent mid grey, as Windows stores it: colour already multiplied by alpha.
+    img = T.bitmap_to_image(bytes([64, 64, 64, 128]), 1, 1)
+    r, g, b, a = img.getpixel((0, 0))
+    assert a == 128 and 126 <= r <= 129
+
+
+def test_icon_with_no_alpha_is_opaque_not_black():
+    img = T.bitmap_to_image(bytes([10, 20, 30, 0]), 1, 1)
+    assert img.getpixel((0, 0)) == (30, 20, 10, 255)
+
+
+def test_icon_cache_key_changes_when_the_program_changes(tmp_path):
+    exe = tmp_path / "app.exe"
+    exe.write_bytes(b"1")
+    before = T.icon_cache_key(str(exe), 26)
+    os.utime(exe, (1_000_000_000, 1_000_000_000))
+    assert T.icon_cache_key(str(exe), 26) != before
+
+
+def test_old_cached_icons_are_fetched_again(monkeypatch):
+    from PIL import Image
+
+    target = "https://example.com"
+    cached = os.path.join(T.icon_cache_dir(), T.icon_cache_key(target, 8) + ".png")
+    Image.new("RGBA", (8, 8), (0, 0, 255, 255)).save(cached)
+    monkeypatch.setattr(T, "shell_icon", lambda path, px: Image.new("RGBA", (8, 8), (255, 0, 0, 255)))
+    entry = {"name": "Site", "path": target}
+    assert T.get_icon_image(entry, 8).getpixel((0, 0)) == (0, 0, 255, 255)  # fresh cache is used
+    old = T.time.time() - (T.ICON_CACHE_DAYS + 1) * 86400
+    os.utime(cached, (old, old))
+    assert T.get_icon_image(entry, 8).getpixel((0, 0)) == (255, 0, 0, 255)  # stale cache is replaced

@@ -1,6 +1,6 @@
 @echo off
 rem Local build for development. Makes dist\TrayLauncher\TrayLauncher.exe.
-rem Needs Python 3.9 or newer. Releases are built by GitHub Actions instead.
+rem Needs Python 3.11 or newer. Releases are built by GitHub Actions instead.
 cd /d "%~dp0"
 
 rem Use the "py" launcher that real Python installs. On a fresh Windows PC the plain
@@ -17,7 +17,7 @@ if not defined PY (
     goto :fail
 )
 
-%PY% -m pip install --upgrade -r requirements-dev.txt || goto :fail
+%PY% -m pip install --require-hashes -r requirements-lock.txt || goto :fail
 %PY% traylauncher.py --make-icon || goto :fail
 %PY% -m PyInstaller --noconsole --onedir --noconfirm --name TrayLauncher --icon icon.ico traylauncher.py || goto :fail
 copy /y apps.example.json dist\TrayLauncher\apps.json >nul

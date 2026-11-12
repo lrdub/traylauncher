@@ -36,3 +36,12 @@ Name: "{userprograms}\TrayLauncher"; Filename: "{app}\TrayLauncher.exe"
 [UninstallDelete]
 ; Icon cache and error log
 Type: filesandordirs; Name: "{localappdata}\TrayLauncher"
+
+[Code]
+// "Start with Windows" (tray mode) saves a value under the Run key. Remove it on uninstall,
+// or Windows would try to start the deleted program at every sign-in.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'TrayLauncher');
+end;

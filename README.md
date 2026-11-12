@@ -28,9 +28,9 @@ Click "Edit apps list" at the bottom of the menu, or open `apps.json` in the ins
     { "name": "Notepad", "path": "notepad.exe" },
     { "separator": true },
     {
-      "name": "AI",
+      "name": "Tools",
       "items": [
-        { "name": "ChatGPT", "path": "shell:AppsFolder\\OpenAI.Codex_2p2nqsd0c76g0!App" },
+        { "name": "Calculator", "path": "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App" },
         { "name": "Docs", "path": "https://example.com/docs" }
       ]
     }
@@ -44,22 +44,26 @@ Each entry can have:
 | --- | --- |
 | `name` | Text shown in the menu. |
 | `path` | What to open: a program, file, folder, web address, or Store app (see below). Environment variables such as `%APPDATA%` work. |
-| `args` | Optional list of arguments to pass to a program. |
-| `start_in` | Optional folder to start the program in (used with `args`). |
+| `args` | Optional list of arguments to pass to a program, for example `["--new-window"]`. A single text value counts as one argument. Environment variables work. |
+| `start_in` | Optional folder to start the program in (used with `args`). Environment variables work. |
 | `icon` | Optional path to a `.png`, `.ico`, or program to take the icon from. |
 | `items` | A list of entries. This makes the entry a folder. Folders can contain folders. |
 | `separator` | `true` draws a divider line. |
 
 In JSON, write each backslash twice (`\\`).
 
-If the file has a mistake, the menu shows an error line at the top and your file is left alone.
+Save the file as UTF-8 (the Notepad default) or UTF-16.
+
+If the file has a mistake, the menu shows an error line at the top and your file is left alone. Entries with a mistake are left out of the menu; the rest still work.
+
+A menu taller than the screen scrolls with the mouse wheel.
 
 ### Store apps and other apps without a normal path
 
 Run this in PowerShell to list the name and ID of an app. Change the words in the quotes to find yours.
 
 ```powershell
-powershell.exe -NoProfile -Command 'Get-StartApps | Where-Object { $_.Name -match ''claude|chatgpt'' } | Format-List Name, AppID'
+powershell.exe -NoProfile -Command 'Get-StartApps | Where-Object { $_.Name -match ''calculator|paint'' } | Format-List Name, AppID'
 ```
 
 Then use the ID like this: `"path": "shell:AppsFolder\\<AppID>"`.
@@ -75,27 +79,33 @@ Run `TrayLauncher.exe` with one of these:
 | (none) | Show the menu, then exit when you pick something. This is what the pinned taskbar icon does. |
 | `--tray` | Stay running as an icon in the system tray (by the clock). The tray menu has a "Start with Windows" switch. |
 | `--classic` | Use the plain Windows menu instead of the styled one. |
-| `--version` | Print the version. |
+| `--version` | Show the version. |
 
 ## Troubleshooting
 
-If the menu looks plain instead of styled, the styled menu hit an error and fell back. The reason is written to `%LOCALAPPDATA%\TrayLauncher\error.log`. Please include it if you open an issue.
+If the menu looks plain instead of styled, the styled menu hit an error and fell back. The reason is written to `%LOCALAPPDATA%\TrayLauncher\error.log`. Please include it if you open an issue. The log can contain file paths that show your Windows user name, so read it first and remove anything you do not want to share.
+
+If "Edit apps list" opens Notepad, no program is set to open `.json` files. That is fine. To use another editor, set it as the default for `.json` files in Windows Settings.
+
+If an app's icon changes after an update, the menu picks up the new one within a week. To refresh icons straight away, delete the `%LOCALAPPDATA%\TrayLauncher\icons` folder.
 
 If an app shows a coloured letter instead of its icon, Windows could not supply one. Set the `icon` field for that entry.
 
 ## Uninstall
 
-Use Settings, Apps, Installed apps, then remove TrayLauncher. Your `apps.json` is kept in case you reinstall.
+Use Settings, Apps, Installed apps, then remove TrayLauncher. This also turns off "Start with Windows". Your `apps.json` is kept in case you reinstall.
 
 ## Build from source
 
-You need Python 3.9 or newer.
+You need Python 3.11 or newer.
 
 ```
-pip install -r requirements-dev.txt
+pip install --require-hashes -r requirements-lock.txt
 python -m pytest
 build.bat
 ```
+
+Package versions are pinned in `requirements.txt` and `requirements-dev.txt`. `requirements-lock.txt` adds every indirect package and the download hashes, and is what CI, releases and `build.bat` install. After changing a version, rebuild the lock file with the command at its top.
 
 `build.bat` makes `dist\TrayLauncher\TrayLauncher.exe`. If TrayLauncher is already installed, it also updates the installed copy and keeps your `apps.json`.
 
@@ -103,7 +113,7 @@ The tests run on any system. The menu itself only runs on Windows.
 
 ## Make a release
 
-Releases are built by GitHub Actions. Update `CHANGELOG.md` and `__version__` in `traylauncher.py`, then push a tag:
+Releases are built by GitHub Actions. Update `CHANGELOG.md` and `__version__` in `traylauncher.py`, then push a tag. The release stops if the tag and `__version__` do not match.
 
 ```
 git tag v1.0.1

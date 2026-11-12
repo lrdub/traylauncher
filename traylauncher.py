@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 __version__ = "1.0.0"
 
@@ -51,8 +52,65 @@ def config_path():
     return os.path.join(base_dir(), "apps.json")
 
 
+def decode_config(raw):
+    """Turn the bytes of apps.json into text. Accepts UTF-8 (with or without a BOM) and UTF-16.
+
+    Notepad can save "UTF-8 with BOM", and Windows PowerShell 5.1 writes UTF-16 by default.
+    """
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    return raw.decode("utf-8-sig")
+
+
+def clean_entries(entries, problems, where="apps"):
+    """Check config entries and return a cleaned copy. Bad entries are skipped and described in problems.
+
+    The menus can then trust every entry: it is a dict, text fields are strings, args is a list
+    of strings and items is a list of clean entries.
+    """
+    cleaned = []
+    for n, e in enumerate(entries, 1):
+        label = f"{where} entry {n}"
+        if not isinstance(e, dict):
+            problems.append(f"{label} is not {{ ... }}")
+            continue
+        e = dict(e)
+        e.pop(EDIT_KEY, None)
+        if e.get("separator"):
+            cleaned.append({"separator": True})
+            continue
+        for field in ("name", "path", "start_in", "icon"):
+            value = e.get(field)
+            if value is None:
+                e.pop(field, None)
+            elif isinstance(value, (dict, list, bool)):
+                problems.append(f"{label}: {field} must be text")
+                e.pop(field, None)
+            else:
+                e[field] = str(value)
+        if "name" in e:
+            label = f"'{e['name']}'"
+        args = e.get("args")
+        if args is None:
+            e.pop("args", None)
+        elif isinstance(args, str):
+            e["args"] = [args]  # one argument written without the [ ]
+        elif isinstance(args, list) and all(not isinstance(a, (dict, list)) for a in args):
+            e["args"] = [str(a) for a in args]
+        else:
+            problems.append(f"{label}: args must be a list like [\"--flag\"]")
+            continue
+        if "items" in e:
+            if not isinstance(e["items"], list):
+                problems.append(f"{label}: items must be a list")
+                continue
+            e["items"] = clean_entries(e["items"], problems, e.get("name", label))
+        cleaned.append(e)
+    return cleaned
+
+
 def load_config():
-    """Read apps.json. Create it if missing. Never raise: return an error entry instead."""
+    """Read apps.json. Create it if missing. Never raise: return an error message instead."""
     path = config_path()
     if not os.path.exists(path):
         try:
@@ -61,37 +119,69 @@ def load_config():
         except OSError:
             return DEFAULT_CONFIG, None
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict) or not isinstance(data.get("apps"), list):
-            return {"apps": []}, 'apps.json must contain {"apps": [ ... ]}'
-        return data, None
-    except (OSError, json.JSONDecodeError) as e:
+        with open(path, "rb") as f:
+            data = json.loads(decode_config(f.read()))
+    except (OSError, ValueError) as e:  # ValueError covers JSON and text-encoding errors
         return {"apps": []}, f"apps.json problem: {e}"
+    if not isinstance(data, dict) or not isinstance(data.get("apps"), list):
+        return {"apps": []}, 'apps.json must contain {"apps": [ ... ]}'
+    problems = []
+    data = dict(data, apps=clean_entries(data["apps"], problems))
+    if problems:
+        more = f" (and {len(problems) - 1} more)" if len(problems) > 1 else ""
+        return data, f"apps.json problem: {problems[0]}{more}"
+    return data, None
+
+
+EDIT_KEY = "_edit_apps_list"  # marks the built-in "Edit apps list" entry
+
+
+def edit_entry():
+    return {"name": "Edit apps list", "path": config_path(), EDIT_KEY: True}
+
+
+def open_config():
+    """Open apps.json in the user's editor. Fall back to Notepad if .json has no program set."""
+    path = config_path()
+    try:
+        os.startfile(path)
+    except OSError:
+        try:
+            subprocess.Popen(["notepad.exe", path])
+        except Exception as e:  # noqa: BLE001
+            message_box(f"Could not open {path}.\n\n{e}")
 
 
 def launch(entry):
-    """Start one app, file, folder or URL."""
-    target = os.path.expandvars(str(entry.get("path", "")))
-    args = [os.path.expandvars(str(a)) for a in entry.get("args", [])]
-    if not target:
-        return
+    """Start one app, file, folder or URL. Never raise: show a message instead."""
     try:
+        if entry.get(EDIT_KEY):
+            open_config()
+            return
+        target = os.path.expandvars(str(entry.get("path") or ""))
+        if not target:
+            return
+        args = entry.get("args") or []
+        if isinstance(args, str):
+            args = [args]
+        args = [os.path.expandvars(str(a)) for a in args]
         if args:
-            subprocess.Popen([target, *args], cwd=entry.get("start_in") or None)
+            start_in = entry.get("start_in")
+            subprocess.Popen([target, *args], cwd=os.path.expandvars(start_in) if start_in else None)
         else:
             os.startfile(target)  # Windows only: opens exes, files, folders, URLs
     except Exception as e:  # noqa: BLE001 - show any failure to the user
-        message_box(f"Could not start '{entry.get('name', target)}'.\n\n{e}")
+        message_box(f"Could not start '{entry.get('name') or entry.get('path')}'.\n\n{e}")
 
 
-def message_box(text):
+def message_box(text, error=True):
     try:
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(0, text, APP_NAME, 0x10)
+        ctypes.windll.user32.MessageBoxW(0, text, APP_NAME, 0x10 if error else 0x40)
     except Exception:  # noqa: BLE001
-        print(text)
+        if sys.stdout:
+            print(text)
 
 
 def make_action(entry):
@@ -120,11 +210,12 @@ def build_items(entries, Item, Menu):
 # Start with Windows ---------------------------------------------------------
 
 def _run_command():
+    """Command Windows runs at sign-in. It must include --tray, or sign-in would pop the menu up."""
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}"'
+        return f'"{sys.executable}" --tray'
     pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     exe = pyw if os.path.exists(pyw) else sys.executable
-    return f'"{exe}" "{os.path.abspath(__file__)}"'
+    return f'"{exe}" "{os.path.abspath(__file__)}" --tray'
 
 
 def autostart_enabled():
@@ -136,6 +227,33 @@ def autostart_enabled():
             return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def repair_autostart():
+    """Version 1.0.0 saved the sign-in command without --tray, so sign-in opened the popup menu.
+
+    If "Start with Windows" is on and the saved command has no --tray, add it. The program path
+    is kept as saved, so running a second copy never moves the setting to that copy.
+    """
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            saved = winreg.QueryValueEx(k, APP_NAME)[0]
+        if "--tray" not in saved:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+                winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ, saved.rstrip() + " --tray")
+    except FileNotFoundError:
+        pass  # setting is off
+    except Exception:  # noqa: BLE001
+        log_error("could not check the Start with Windows setting")
+
+
+def toggle_autostart():
+    try:
+        set_autostart(not autostart_enabled())
+    except Exception as e:  # noqa: BLE001
+        message_box(f"Could not change the Start with Windows setting.\n\n{e}")
 
 
 def set_autostart(enable):
@@ -191,7 +309,7 @@ def build_tk_menu(parent, entries, tk, on_pick):
 
 
 def popup_classic():
-    """Show the menu at the mouse position (which is on the taskbar button), then exit."""
+    """Show the menu at the mouse position (which is on the taskbar button). Returns the picked entry or None."""
     import tkinter as tk
 
     try:  # sharp text on high-DPI screens
@@ -224,7 +342,7 @@ def popup_classic():
         menu.insert_command(0, label=error, state="disabled")
         menu.insert_separator(1)
     menu.add_separator()
-    menu.add_command(label="Edit apps list", command=lambda: on_pick({"name": "apps.json", "path": config_path()}))
+    menu.add_command(label="Edit apps list", command=lambda: on_pick(edit_entry()))
 
     try:
         menu.tk_popup(x, y)
@@ -235,8 +353,7 @@ def popup_classic():
     root.mainloop()
     root.destroy()
 
-    for entry in chosen:
-        launch(entry)
+    return chosen[0] if chosen else None
 
 
 # Modern popup (Windows 11 style) ---------------------------------------------
@@ -244,7 +361,6 @@ def popup_classic():
 def log_error(text):
     """Append to %LOCALAPPDATA%\\TrayLauncher\\error.log so problems can be diagnosed."""
     try:
-        import time
         import traceback
 
         folder = os.path.join(os.environ.get("LOCALAPPDATA", base_dir()), "TrayLauncher")
@@ -289,13 +405,32 @@ def dpi_scale():
         return 1.0
 
 
-def work_area():
-    """Screen area not covered by the taskbar: (left, top, right, bottom)."""
+def work_area(x, y):
+    """Area not covered by the taskbar on the monitor under point (x, y): (left, top, right, bottom).
+
+    Each monitor can have its own taskbar, so the menu must use the monitor that was clicked.
+    """
     import ctypes
     from ctypes import wintypes
 
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+    user32 = ctypes.windll.user32
+    try:
+        user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+        user32.MonitorFromPoint.restype = ctypes.c_void_p
+        user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        monitor = user32.MonitorFromPoint(wintypes.POINT(x, y), 2)  # MONITOR_DEFAULTTONEAREST
+        info = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+        if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            r = info.rcWork
+            return r.left, r.top, r.right, r.bottom
+    except Exception:  # noqa: BLE001
+        log_error("GetMonitorInfo failed, using the main monitor")
     rect = wintypes.RECT()
-    ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(rect), 0)  # SPI_GETWORKAREA
+    user32.SystemParametersInfoW(0x30, 0, ctypes.byref(rect), 0)  # SPI_GETWORKAREA: main monitor
     return rect.left, rect.top, rect.right, rect.bottom
 
 
@@ -364,8 +499,6 @@ def shell_icon(path, px):
         import uuid
         from ctypes import wintypes
 
-        from PIL import Image
-
         class GUID(ctypes.Structure):
             _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
 
@@ -421,13 +554,40 @@ def shell_icon(path, px):
         user32.ReleaseDC(None, hdc)
         gdi32.DeleteObject(hbm.value)
 
-        img = Image.frombuffer("RGBA", (w, h), buf.raw, "raw", "BGRA", 0, 1)
-        if img.getchannel("A").getextrema() == (0, 0):  # bitmap had no alpha: make it opaque
-            img.putalpha(255)
-        return img
+        return bitmap_to_image(buf.raw, w, h)
     except Exception:  # noqa: BLE001
         log_error(f"shell_icon failed for {path}")
         return None
+
+
+def bitmap_to_image(raw, w, h):
+    """Turn Windows 32-bit pixel data into a PIL image.
+
+    Windows hands back premultiplied alpha (colour already multiplied by transparency).
+    Reading that as plain alpha gives dark fringes around icon edges, so use Pillow's
+    premultiplied mode "BGRa". Some bitmaps have no alpha at all (every alpha byte is 0):
+    those are opaque, and must not go through "BGRa", which would turn them black.
+    """
+    from PIL import Image
+
+    plain = Image.frombuffer("RGBA", (w, h), raw, "raw", "BGRA", 0, 1)
+    if plain.getchannel("A").getextrema() == (0, 0):
+        plain = plain.copy()
+        plain.putalpha(255)
+        return plain
+    return Image.frombuffer("RGBA", (w, h), raw, "raw", "BGRa", 0, 1).copy()
+
+
+ICON_CACHE_DAYS = 7  # cached icons older than this are fetched again, so app icon changes show up
+
+
+def icon_cache_key(target, px):
+    """Cache file name for an icon. Includes the file's modified time, so an updated exe gets a new icon."""
+    try:
+        stamp = int(os.path.getmtime(target))
+    except (OSError, ValueError):
+        stamp = 0  # URLs, shell: paths and anything else that is not a plain file
+    return hashlib.sha1(f"{target}|{px}|{stamp}".encode("utf-8")).hexdigest()[:16]
 
 
 def resolve_target(target):
@@ -456,10 +616,9 @@ def get_icon_image(entry, px):
     target = entry.get("path")
     if target:
         target = resolve_target(os.path.expandvars(target))
-        key = hashlib.sha1(f"{target}|{px}".encode("utf-8")).hexdigest()[:16]
-        cached = os.path.join(icon_cache_dir(), key + ".png")
+        cached = os.path.join(icon_cache_dir(), icon_cache_key(target, px) + ".png")
         try:
-            if os.path.exists(cached):
+            if os.path.exists(cached) and time.time() - os.path.getmtime(cached) < ICON_CACHE_DAYS * 86400:
                 return Image.open(cached).convert("RGBA")
         except Exception:  # noqa: BLE001
             pass
@@ -515,7 +674,7 @@ def layout(entries, expanded, S, error=None, footer=True):
     walk(entries, 0, "")
     if footer:
         add("sep", SEP)
-        add("edit", ROW, entry={"name": "Edit apps list", "path": config_path()}, indent=0)
+        add("edit", ROW, entry=edit_entry(), indent=0)
     return rows, y + S(8)
 
 
@@ -539,10 +698,13 @@ class MenuPanel:
     def __init__(self, ctx, win, entries, parent=None, error=None, footer=False):
         self.ctx, self.win, self.parent = ctx, win, parent
         self.child = self.child_row = self.hover = self.timer = self.hwnd = None
-        self.x = self.y = 0
+        self.x = self.y = self.offset = 0
         S = ctx.S
-        self.rows, self.height = layout(entries, set(), S, error, footer)
-        self.canvas = ctx.tk.Canvas(win, width=ctx.W, height=self.height, bg=ctx.colors["bg"], highlightthickness=0, bd=0)
+        self.rows, self.full_height = layout(entries, set(), S, error, footer)
+        # A list taller than the screen is cut to fit and scrolls with the mouse wheel.
+        self.height = min(self.full_height, ctx.work[3] - ctx.work[1] - S(16))
+        self.canvas = ctx.tk.Canvas(win, width=ctx.W, height=self.height, bg=ctx.colors["bg"], highlightthickness=0, bd=0,
+                                    scrollregion=(0, 0, ctx.W, self.full_height), yscrollincrement=1)
         self.canvas.pack()
         self.hl = self.canvas.create_polygon(rrect_points(ctx.PAD, 0, ctx.W - ctx.PAD, 10, S(6)), smooth=True,
                                              fill=ctx.colors["hover"], outline="", state="hidden")
@@ -586,7 +748,21 @@ class MenuPanel:
         self.hwnd = get_hwnd(self.win)
         style_window(self.hwnd, c.colors)
 
+    def scroll(self, pixels):
+        """Scroll a list that is taller than the screen. Returns True if it moved."""
+        offset = max(0, min(self.offset + int(pixels), self.full_height - self.height))
+        if offset == self.offset:
+            return False
+        self.close_child()
+        self.offset = offset
+        self.canvas.yview_moveto(offset / self.full_height)
+        self.hover = None
+        self.update_highlight()
+        return True
+
     def row_at(self, y):
+        """Row under window position y (the list may be scrolled)."""
+        y += self.offset
         for r in self.rows:
             if r["kind"] in CLICKABLE and r["y"] <= y < r["y"] + r["h"]:
                 return r
@@ -651,7 +827,7 @@ class MenuPanel:
         x = self.x + c.W - S(4)
         if x + c.W > c.work[2] - S(8):  # no room on the right: open to the left
             x = self.x - c.W + S(4)
-        y = self.y + row["y"] - S(8)
+        y = self.y + row["y"] - self.offset - S(8)
         y = max(min(y, c.work[3] - panel.height - S(8)), c.work[1] + S(8))
         panel.show(x, y)
         self.child, self.child_row = panel, row
@@ -669,6 +845,9 @@ class MenuPanel:
         if self in self.ctx.panels:
             self.ctx.panels.remove(self)
         self.win.destroy()
+
+
+NO_FOCUS_TIMEOUT = 10  # seconds
 
 
 def popup_modern():
@@ -709,12 +888,12 @@ def popup_modern():
         font=tkfont.Font(root=root, family="Segoe UI", size=-S(15)),
         glyph_font=tkfont.Font(root=root, family=icon_family, size=-S(16)),
         chevron_font=tkfont.Font(root=root, family=icon_family, size=-S(12)),
-        work=work_area(), panels=[], chosen=None, close=root.quit,
+        work=None, panels=[], chosen=None, close=root.quit,
     )
 
-    main = MenuPanel(ctx, root, config["apps"], error=error, footer=True)
     cx, cy = cursor_pos()
-    work = ctx.work
+    work = ctx.work = work_area(cx, cy)
+    main = MenuPanel(ctx, root, config["apps"], error=error, footer=True)
     opens_below = cy < (work[1] + work[3]) // 2  # taskbar at the top of the screen
     x = min(max(cx - W // 2, work[0] + S(8)), work[2] - W - S(8))
     y = work[1] + S(8) if opens_below else work[3] - main.height - S(8)
@@ -726,15 +905,29 @@ def popup_modern():
     except Exception:  # noqa: BLE001
         pass
 
-    seen = {"fg": False}
+    def on_wheel(ev):
+        # Scroll whichever panel is under the mouse.
+        under = root.winfo_containing(ev.x_root, ev.y_root)
+        panel = next((p for p in ctx.panels if under in (p.canvas, p.win)), main)
+        panel.scroll(-ev.delta / 120 * S(88))  # two rows per wheel notch
+
+    root.bind_all("<MouseWheel>", on_wheel)
+
+    seen = {"fg": False, "ticks": 0}
 
     def poll():
         # Close when the user clicks somewhere else (once one of our windows has had focus).
+        # If Windows never gave us focus, clicks elsewhere cannot be seen, so close after
+        # NO_FOCUS_TIMEOUT seconds unless the mouse is over the menu.
         try:
+            seen["ticks"] += 1
             fg = user32.GetForegroundWindow()
             if fg in {p.hwnd for p in ctx.panels}:
                 seen["fg"] = True
             elif seen["fg"]:
+                root.quit()
+                return
+            elif seen["ticks"] * 100 > NO_FOCUS_TIMEOUT * 1000 and root.winfo_containing(*root.winfo_pointerxy()) is None:
                 root.quit()
                 return
         except Exception:  # noqa: BLE001
@@ -745,20 +938,26 @@ def popup_modern():
     root.mainloop()
     root.destroy()
 
-    if ctx.chosen:
-        launch(ctx.chosen)
+    return ctx.chosen
 
 
-def popup():
-    """Taskbar click: try the modern menu, fall back to the plain one if anything goes wrong."""
+def popup(modern=None, classic=None):
+    """Taskbar click: try the modern menu, fall back to the plain one if the menu itself fails.
+
+    Launching happens outside the fallback, so a failed launch can never open a second menu.
+    """
+    modern, classic = modern or popup_modern, classic or popup_classic
+    repair_autostart()
     if "--classic" in sys.argv:
-        popup_classic()
-        return
-    try:
-        popup_modern()
-    except Exception:  # noqa: BLE001
-        log_error("popup_modern failed, using classic menu")
-        popup_classic()
+        chosen = classic()
+    else:
+        try:
+            chosen = modern()
+        except Exception:  # noqa: BLE001
+            log_error("popup_modern failed, using classic menu")
+            chosen = classic()
+    if chosen:
+        launch(chosen)
 
 
 # Main -----------------------------------------------------------------------
@@ -777,17 +976,18 @@ def main():
         items.extend(build_items(config["apps"], Item, Menu))
         if items:
             items.append(Menu.SEPARATOR)
-        items.append(Item("Edit apps list", lambda icon, item: os.startfile(config_path())))
+        items.append(Item("Edit apps list", lambda icon, item: open_config()))
         items.append(
             Item(
                 "Start with Windows",
-                lambda icon, item: set_autostart(not autostart_enabled()),
+                lambda icon, item: toggle_autostart(),
                 checked=lambda item: autostart_enabled(),
             )
         )
         items.append(Item("Quit", lambda icon, item: icon.stop()))
         return items
 
+    repair_autostart()
     icon = pystray.Icon(APP_NAME, make_icon_image(), APP_NAME, Menu(menu_items))
 
     # By default pystray shows the menu on right-click only. Make left-click
@@ -811,6 +1011,15 @@ def main():
     icon.run()
 
 
+def show_version():
+    """Print the version. The built exe has no console (sys.stdout is None), so show a box instead."""
+    text = f"{APP_NAME} {__version__}"
+    if sys.stdout:
+        print(text)
+    else:
+        message_box(text, error=False)
+
+
 def selftest():
     """Used by the release build: check that every library is bundled. Returns an exit code."""
     try:
@@ -829,7 +1038,7 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         sys.exit(selftest())
     elif "--version" in sys.argv:
-        print(f"{APP_NAME} {__version__}")
+        show_version()
     elif "--make-icon" in sys.argv:
         write_ico()
     elif "--tray" in sys.argv:

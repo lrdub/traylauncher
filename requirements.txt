@@ -1,2 +1,5 @@
+# Libraries the program needs. Versions are pinned so every build uses the same code.
+# To upgrade: change a version here or in requirements-dev.txt, then rebuild the lock file
+# with the command at the top of requirements-lock.txt.
 pystray==0.19.5
-pillow
+pillow==13.0.0
