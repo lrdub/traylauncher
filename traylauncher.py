@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 APP_NAME = "TrayLauncher"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"

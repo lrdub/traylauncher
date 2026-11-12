@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.1
 
 - "Start with Windows" now starts the tray icon. Before, it opened the popup menu at sign-in. A setting saved by 1.0.0 is repaired the next time TrayLauncher runs.
 - Uninstalling now turns off "Start with Windows".
