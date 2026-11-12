@@ -312,13 +312,7 @@ def popup_classic():
     """Show the menu at the mouse position (which is on the taskbar button). Returns the picked entry or None."""
     import tkinter as tk
 
-    try:  # sharp text on high-DPI screens
-        import ctypes
-
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:  # noqa: BLE001
-        pass
-
+    dpi_aware()  # sharp text on high-DPI screens. The same setting the modern menu uses.
     config, error = load_config()
     root = tk.Tk()
     x, y = root.winfo_pointerx(), root.winfo_pointery()
@@ -388,18 +382,65 @@ def theme():
 
 
 def dpi_aware():
-    try:
-        import ctypes
+    """Ask Windows for real pixels on every monitor. Returns 2 (per monitor), 1 (main monitor only) or 0.
 
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    With "main monitor only" (system) awareness, Windows stretches the menu on a monitor whose
+    scale differs from the main one, so it looks blurry there. Per-monitor awareness lets the menu
+    draw itself at the right size for the monitor that was clicked.
+    """
+    import ctypes
+
+    # Each call fails harmlessly if the awareness is already set, so try the best first.
+    done = False
+    try:  # Windows 10 1703 and later
+        user32 = ctypes.windll.user32
+        user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        done = bool(user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)))  # PER_MONITOR_AWARE_V2
     except Exception:  # noqa: BLE001
         pass
-
-
-def dpi_scale():
+    for level in (2, 1):  # Windows 8.1 and later: per monitor, then main monitor only
+        if done:
+            break
+        try:
+            done = ctypes.windll.shcore.SetProcessDpiAwareness(level) == 0  # S_OK
+        except Exception:  # noqa: BLE001
+            pass
     try:
-        import ctypes
+        value = ctypes.c_int(0)
+        if ctypes.windll.shcore.GetProcessDpiAwareness(None, ctypes.byref(value)) == 0:
+            return value.value
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
 
+
+def monitor_at(x, y):
+    """Handle of the monitor under point (x, y), or the nearest one. None if Windows cannot say."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+    user32.MonitorFromPoint.restype = ctypes.c_void_p
+    return user32.MonitorFromPoint(wintypes.POINT(x, y), 2)  # MONITOR_DEFAULTTONEAREST
+
+
+def dpi_scale(x, y, awareness):
+    """Size multiplier for the monitor under (x, y). 1.0 means 100% scaling."""
+    import ctypes
+
+    if awareness == 2:  # per monitor: use the clicked monitor's own scale
+        try:
+            dpi_x, dpi_y = ctypes.c_uint(0), ctypes.c_uint(0)
+            ctypes.windll.shcore.GetDpiForMonitor.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+            monitor = monitor_at(x, y)
+            if monitor and ctypes.windll.shcore.GetDpiForMonitor(monitor, 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y)) == 0:
+                return max(1.0, dpi_x.value / 96.0)  # 0 = MDT_EFFECTIVE_DPI
+        except Exception:  # noqa: BLE001
+            log_error("GetDpiForMonitor failed, using the main monitor's scale")
+    if awareness == 0:  # Windows scales the whole window itself
+        return 1.0
+    try:
         return max(1.0, ctypes.windll.user32.GetDpiForSystem() / 96.0)
     except Exception:  # noqa: BLE001
         return 1.0
@@ -419,10 +460,8 @@ def work_area(x, y):
 
     user32 = ctypes.windll.user32
     try:
-        user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
-        user32.MonitorFromPoint.restype = ctypes.c_void_p
         user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        monitor = user32.MonitorFromPoint(wintypes.POINT(x, y), 2)  # MONITOR_DEFAULTTONEAREST
+        monitor = monitor_at(x, y)
         info = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
         if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
             r = info.rcWork
@@ -689,6 +728,24 @@ def get_hwnd(win):
     return ctypes.windll.user32.GetAncestor(win.winfo_id(), 2)  # GA_ROOT
 
 
+def flyout_x(parent_x, W, work, S):
+    """Left edge for a flyout beside a panel at parent_x, kept on the monitor in `work`.
+
+    Opens to the right if it fits, else to the left. If neither fits, it goes on the side with
+    more room and is pushed back inside the monitor, so it never spills onto the next screen.
+    """
+    left_edge, right_edge = work[0] + S(8), work[2] - S(8)
+    right = parent_x + W - S(4)
+    left = parent_x - W + S(4)
+    if right + W <= right_edge:
+        return right
+    if left >= left_edge:
+        return left
+    room_right, room_left = right_edge - (parent_x + W), parent_x - left_edge
+    x = right if room_right > room_left else left
+    return max(min(x, right_edge - W), left_edge)
+
+
 class MenuPanel:
     """One menu window: the main menu, or a flyout that opens beside a folder row."""
 
@@ -824,9 +881,7 @@ class MenuPanel:
         top = c.tk.Toplevel(c.root)
         top.withdraw()
         panel = MenuPanel(c, top, row["entry"]["items"], parent=self)
-        x = self.x + c.W - S(4)
-        if x + c.W > c.work[2] - S(8):  # no room on the right: open to the left
-            x = self.x - c.W + S(4)
+        x = flyout_x(self.x, c.W, c.work, S)
         y = self.y + row["y"] - self.offset - S(8)
         y = max(min(y, c.work[3] - panel.height - S(8)), c.work[1] + S(8))
         panel.show(x, y)
@@ -856,11 +911,12 @@ def popup_modern():
     from tkinter import font as tkfont
     from types import SimpleNamespace
 
-    dpi_aware()
+    awareness = dpi_aware()  # must come before any window or screen position is read
+    cx, cy = cursor_pos()  # the taskbar button that was clicked
     root = tk.Tk()
     root.withdraw()
     user32 = ctypes.windll.user32
-    scale = dpi_scale()
+    scale = dpi_scale(cx, cy, awareness)  # monitors can have different scale settings
 
     def S(v):
         return max(1, int(round(v * scale)))
@@ -891,7 +947,6 @@ def popup_modern():
         work=None, panels=[], chosen=None, close=root.quit,
     )
 
-    cx, cy = cursor_pos()
     work = ctx.work = work_area(cx, cy)
     main = MenuPanel(ctx, root, config["apps"], error=error, footer=True)
     opens_below = cy < (work[1] + work[3]) // 2  # taskbar at the top of the screen
