@@ -205,12 +205,12 @@ def make_menu(monkeypatch):
     monkeypatch.setattr(T, "get_hwnd", lambda w: id(w))
     monkeypatch.setattr(T, "style_window", lambda *a: None)
 
-    def make(x=500, y=300, screen_w=1920, screen_h=1040, apps=APPS):
+    def make(x=500, y=300, screen_w=1920, screen_h=1040, apps=APPS, screen_left=0):
         tk = SimpleNamespace(Canvas=FakeCanvas, Toplevel=lambda root: FakeWin(clock))
         ctx = SimpleNamespace(
             tk=tk, root=FakeWin(clock), colors=T.theme(), S=S, W=300, PAD=8, ICON=26,
             icon_for=lambda e: None, font=None, glyph_font=None, chevron_font=None,
-            work=(0, 0, screen_w, screen_h), panels=[], chosen=None, closed=False,
+            work=(screen_left, 0, screen_left + screen_w, screen_h), panels=[], chosen=None, closed=False,
         )
         ctx.close = lambda: setattr(ctx, "closed", True)
         main = T.MenuPanel(ctx, ctx.root, apps, footer=True)
@@ -315,6 +315,104 @@ def test_scrolling_closes_a_flyout_and_flyouts_follow_the_scroll(make_menu):
     assert flyout.y != main.y + row["y"] - 8  # without the scroll offset it would be off screen
     main.scroll(-50)
     assert main.child is None and not flyout.win.alive
+
+
+# Several monitors -----------------------------------------------------------------
+# A monitor to the left of the main one has negative x positions. Menus must stay on
+# the monitor that was clicked and never spill onto the next one.
+
+LEFT_MONITOR = dict(screen_left=-1920, screen_w=1920)
+
+
+@pytest.mark.parametrize("menu_x", [-1920 + 8, -1920 // 2, -300 - 8])
+def test_flyouts_stay_on_a_monitor_left_of_the_main_one(make_menu, menu_x):
+    ctx, main, clock = make_menu(x=menu_x, **LEFT_MONITOR)
+    click(main, "AI")
+    click(main.child, "More")
+    for panel in (main.child, main.child.child):
+        assert -1920 + 8 <= panel.x and panel.x + ctx.W <= -8
+
+
+def test_flyout_at_the_right_edge_of_the_left_monitor_opens_left(make_menu):
+    ctx, main, clock = make_menu(x=-300 - 8, **LEFT_MONITOR)
+    click(main, "AI")
+    assert main.child.x < main.x  # opening right would put it on the main monitor
+
+
+def test_flyout_x_opens_right_when_it_fits():
+    assert T.flyout_x(100, 300, (0, 0, 1920, 1040), S) == 100 + 300 - 4
+
+
+def test_flyout_x_opens_left_when_right_has_no_room():
+    assert T.flyout_x(1600, 300, (0, 0, 1920, 1040), S) == 1600 - 300 + 4
+
+
+@pytest.mark.parametrize("parent_x", [8, 150, 292])
+def test_flyout_x_stays_on_a_narrow_monitor(parent_x):
+    # 600 wide: a 300 wide flyout fits on neither side of a 300 wide menu.
+    x = T.flyout_x(parent_x, 300, (0, 0, 600, 1040), S)
+    assert 8 <= x and x + 300 <= 600 - 8
+
+
+class FakeDll:
+    """Stands in for ctypes.windll so the Windows-only DPI code can run in tests."""
+
+    def __init__(self, **funcs):
+        self.__dict__.update(funcs)
+
+
+def fake_windll(monitor_dpi=144, system_dpi=96, pmv2_ok=True, awareness=2):
+    calls = []
+
+    def get_dpi_for_monitor(monitor, kind, dx, dy):
+        dx._obj.value = dy._obj.value = monitor_dpi
+        return 0
+
+    def set_context(ctx):
+        calls.append("context")
+        return 1 if pmv2_ok else 0
+
+    def set_awareness(level):
+        calls.append(level)
+        return 0
+
+    def get_awareness(process, value):
+        value._obj.value = awareness
+        return 0
+
+    user32 = FakeDll(SetProcessDpiAwarenessContext=set_context, GetDpiForSystem=lambda: system_dpi)
+    shcore = FakeDll(GetDpiForMonitor=get_dpi_for_monitor, SetProcessDpiAwareness=set_awareness,
+                     GetProcessDpiAwareness=get_awareness)
+    return SimpleNamespace(user32=user32, shcore=shcore), calls
+
+
+def test_scale_follows_the_clicked_monitor(monkeypatch):
+    import ctypes
+
+    windll, _ = fake_windll(monitor_dpi=144, system_dpi=96)
+    monkeypatch.setattr(ctypes, "windll", windll, raising=False)
+    monkeypatch.setattr(T, "monitor_at", lambda x, y: 1)
+    assert T.dpi_scale(-500, 500, awareness=2) == 1.5  # 150% monitor, main one at 100%
+    assert T.dpi_scale(-500, 500, awareness=1) == 1.0  # older mode: main monitor's scale only
+    assert T.dpi_scale(-500, 500, awareness=0) == 1.0
+
+
+def test_per_monitor_awareness_is_asked_for_first(monkeypatch):
+    import ctypes
+
+    windll, calls = fake_windll()
+    monkeypatch.setattr(ctypes, "windll", windll, raising=False)
+    assert T.dpi_aware() == 2
+    assert calls == ["context"]  # nothing older is tried once it works
+
+
+def test_awareness_falls_back_on_older_windows(monkeypatch):
+    import ctypes
+
+    windll, calls = fake_windll(pmv2_ok=False)
+    monkeypatch.setattr(ctypes, "windll", windll, raising=False)
+    assert T.dpi_aware() == 2
+    assert calls == ["context", 2]
 
 
 # Config problems ----------------------------------------------------------------
